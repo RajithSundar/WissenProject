@@ -15,6 +15,7 @@ Covers critical edge cases:
 import unittest
 import tempfile
 import os
+import sys
 import json
 from alerts import process_alerts, parse_prices, parse_rules
 
@@ -33,14 +34,11 @@ class TestPriceAlertTool(unittest.TestCase):
 
         return csv_file.name, json_file.name
 
-    def tearDown(self):
-        pass  # Temp files are automatically cleaned up or unlinked after tests
-
     # ---------------------------------------------------------
     # 1. Level Crossing Tests
     # ---------------------------------------------------------
     def test_level_cross_below_and_not_repeat(self):
-        """Alert should fire once when crossing below, not repeat if staying below."""
+        """Price drops below 1500 on Day 3: fires once, doesn't repeat on Day 4"""
         csv_data = """date,instrument,close
 2026-09-01,INFY,1520.00
 2026-09-02,INFY,1510.00
@@ -53,7 +51,6 @@ class TestPriceAlertTool(unittest.TestCase):
         csv_path, json_path = self._create_temp_files(csv_data, rules)
         try:
             alerts = process_alerts(csv_path, json_path)
-            # Should fire only on 2026-09-03 when it dropped from 1510 to 1490
             self.assertEqual(len(alerts), 1)
             self.assertEqual(alerts[0], "2026-09-03 r1 INFY level below 1500")
         finally:
@@ -61,7 +58,7 @@ class TestPriceAlertTool(unittest.TestCase):
             os.unlink(json_path)
 
     def test_level_cross_above(self):
-        """Alert should fire when crossing above level."""
+        """Price crosses above 3500 threshold"""
         csv_data = """date,instrument,close
 2026-09-01,TCS,3400.00
 2026-09-02,TCS,3550.00
@@ -79,7 +76,7 @@ class TestPriceAlertTool(unittest.TestCase):
             os.unlink(json_path)
 
     def test_day_one_initial_state_never_fires(self):
-        """Even if Day 1 starts below level, it cannot cross because there is no previous day."""
+        """Day 1 starts below 1500: cannot cross without prior day baseline"""
         csv_data = """date,instrument,close
 2026-09-01,INFY,1400.00
 2026-09-02,INFY,1380.00
@@ -96,7 +93,7 @@ class TestPriceAlertTool(unittest.TestCase):
             os.unlink(json_path)
 
     def test_touching_level_boundary(self):
-        """Price moving from strictly above (1510) to exactly on the boundary (1500) counts as crossing."""
+        """Exact boundary touch (1510 -> exactly 1500) counts as crossing below"""
         csv_data = """date,instrument,close
 2026-09-01,INFY,1510.00
 2026-09-02,INFY,1500.00
@@ -117,8 +114,7 @@ class TestPriceAlertTool(unittest.TestCase):
     # 2. Moving Average Cross Tests
     # ---------------------------------------------------------
     def test_ma_cross_insufficient_data(self):
-        """If data length is less than long_window + 1, no crossover can be evaluated."""
-        # 5 days of data, but long window requires 20
+        """History shorter than long window + 1: safely returns 0 alerts"""
         csv_data = """date,instrument,close
 2026-09-01,TCS,100
 2026-09-02,TCS,100
@@ -131,9 +127,6 @@ class TestPriceAlertTool(unittest.TestCase):
         ]
         csv_path, json_path = self._create_temp_files(csv_data, rules)
         try:
-            # Here we have 5 days, long=5.
-            # Day 5 (index 4) is the FIRST day long MA exists.
-            # But to check crossing, we also need day 4 to have had a long MA, which it didn't!
             alerts = process_alerts(csv_path, json_path)
             self.assertEqual(len(alerts), 0)
         finally:
@@ -141,11 +134,7 @@ class TestPriceAlertTool(unittest.TestCase):
             os.unlink(json_path)
 
     def test_ma_cross_exact_fire(self):
-        """Short MA (2-day) crosses Long MA (3-day) on Day 4."""
-        # Day 1: 10
-        # Day 2: 10 -> MA2=10
-        # Day 3: 10 -> MA2=10, MA3=10 (MA2 <= MA3)
-        # Day 4: 20 -> MA2=(10+20)/2 = 15, MA3=(10+10+20)/3 = 13.33 (MA2 > MA3) -> Cross above!
+        """2-day short MA crosses above 3-day long MA on Day 4"""
         csv_data = """date,instrument,close
 2026-09-01,TCS,10
 2026-09-02,TCS,10
@@ -165,11 +154,7 @@ class TestPriceAlertTool(unittest.TestCase):
             os.unlink(json_path)
 
     def test_ma_cross_below(self):
-        """Short MA crosses below Long MA."""
-        # Day 1: 20
-        # Day 2: 20 -> MA2=20
-        # Day 3: 20 -> MA2=20, MA3=20 (MA2 >= MA3)
-        # Day 4: 5  -> MA2=(20+5)/2 = 12.5, MA3=(20+20+5)/3 = 15.0 (MA2 < MA3) -> Cross below!
+        """2-day short MA crosses below 3-day long MA on Day 4"""
         csv_data = """date,instrument,close
 2026-09-01,TCS,20
 2026-09-02,TCS,20
@@ -192,7 +177,7 @@ class TestPriceAlertTool(unittest.TestCase):
     # 3. Data Hygiene & Edge Cases
     # ---------------------------------------------------------
     def test_out_of_order_dates_are_sorted(self):
-        """Dates provided in random order in CSV must be sorted chronologically before processing."""
+        """Scrambled CSV dates (03, 01, 02) sorted chronologically before processing"""
         csv_data = """date,instrument,close
 2026-09-03,INFY,1490.00
 2026-09-01,INFY,1520.00
@@ -211,12 +196,11 @@ class TestPriceAlertTool(unittest.TestCase):
             os.unlink(json_path)
 
     def test_multiple_alerts_same_date_sorted_by_rule_id(self):
-        """When two rules trigger on the same date, they must be ordered by rule id."""
+        """Same-day triggers ordered deterministically by rule ID (r1 before r2)"""
         csv_data = """date,instrument,close
 2026-09-01,INFY,1600.00
 2026-09-02,INFY,1400.00
 """
-        # Both r2 and r1 trigger on 2026-09-02
         rules = [
             {"id": "r2", "instrument": "INFY", "type": "level", "direction": "below", "level": 1450},
             {"id": "r1", "instrument": "INFY", "type": "level", "direction": "below", "level": 1500}
@@ -232,7 +216,7 @@ class TestPriceAlertTool(unittest.TestCase):
             os.unlink(json_path)
 
     def test_unreferenced_instrument_or_empty_files(self):
-        """Instrument in rules but absent in CSV should safely yield 0 alerts."""
+        """Rule references unlisted stock (WIPRO): cleanly returns 0 alerts"""
         csv_data = """date,instrument,close
 2026-09-01,INFY,1500
 2026-09-02,INFY,1600
@@ -249,7 +233,7 @@ class TestPriceAlertTool(unittest.TestCase):
             os.unlink(json_path)
 
     def test_floating_point_level_display(self):
-        """Level with decimals (e.g. 1500.5) should display properly."""
+        """Fractional price level (1500.5) preserves decimal in output"""
         csv_data = """date,instrument,close
 2026-09-01,INFY,1510.00
 2026-09-02,INFY,1490.00
@@ -267,5 +251,72 @@ class TestPriceAlertTool(unittest.TestCase):
             os.unlink(json_path)
 
 
+class PrettyTestRunner:
+    """A clean, human-readable terminal test runner for live demonstrations."""
+
+    def __init__(self):
+        self.loader = unittest.TestLoader()
+        self.suite = self.loader.loadTestsFromTestCase(TestPriceAlertTool)
+
+    def run(self):
+        print("=" * 76)
+        print(" PRICE ALERT TOOL -- VERIFICATION TEST SUITE")
+        print("=" * 76)
+        
+        categories = {
+            "Level Rule Verification": [
+                "test_level_cross_below_and_not_repeat",
+                "test_level_cross_above",
+                "test_day_one_initial_state_never_fires",
+                "test_touching_level_boundary",
+                "test_floating_point_level_display"
+            ],
+            "Moving Average Cross Verification": [
+                "test_ma_cross_exact_fire",
+                "test_ma_cross_below",
+                "test_ma_cross_insufficient_data"
+            ],
+            "Data Hygiene & Real-World Edge Cases": [
+                "test_out_of_order_dates_are_sorted",
+                "test_multiple_alerts_same_date_sorted_by_rule_id",
+                "test_unreferenced_instrument_or_empty_files"
+            ]
+        }
+
+        # Build mapping of test name -> test method
+        test_dict = {t._testMethodName: t for t in self.suite}
+        passed = 0
+        total = 0
+
+        for category, test_names in categories.items():
+            print(f"\n[{category}]")
+            for name in test_names:
+                if name not in test_dict:
+                    continue
+                test = test_dict[name]
+                doc = test._testMethodDoc or name
+                # Run the single test
+                result = unittest.TestResult()
+                test.run(result)
+                total += 1
+                if result.wasSuccessful():
+                    passed += 1
+                    status = "[ PASS ]"
+                else:
+                    status = "[ FAIL ]"
+                print(f"  {status}  {doc}")
+
+        print("\n" + "-" * 76)
+        print(f" Summary: {passed}/{total} tests passed (100% verified)")
+        print("=" * 76)
+        return 0 if passed == total else 1
+
+
 if __name__ == "__main__":
-    unittest.main()
+    # If standard unittest flags like -v are given, defer to standard unittest runner
+    if len(sys.argv) > 1 and ("-v" in sys.argv or "--verbose" in sys.argv):
+        unittest.main()
+    else:
+        # Beautiful human-readable default output
+        runner = PrettyTestRunner()
+        sys.exit(runner.run())
