@@ -119,10 +119,14 @@ def evaluate_level_rule(rule: dict, prices: List[PricePoint]) -> List[AlertEvent
     (it was on the other side the previous day).
     """
     alerts: List[AlertEvent] = []
-    rule_id = rule.get("id", "")
-    instrument = rule.get("instrument", "")
-    direction = rule.get("direction", "").lower()
-    level = float(rule.get("level", 0.0))
+    rule_id = str(rule.get("id", "")).strip()
+    instrument = str(rule.get("instrument", "")).strip()
+    direction = str(rule.get("direction", "")).strip().lower()
+    
+    try:
+        level = float(rule.get("level", 0.0))
+    except (ValueError, TypeError):
+        return alerts
 
     if len(prices) < 2:
         return alerts
@@ -159,11 +163,15 @@ def evaluate_ma_cross_rule(rule: dict, prices: List[PricePoint]) -> List[AlertEv
     Moving averages need a full window of days before they are defined.
     """
     alerts: List[AlertEvent] = []
-    rule_id = rule.get("id", "")
-    instrument = rule.get("instrument", "")
-    short_w = int(rule.get("short", 0))
-    long_w = int(rule.get("long", 0))
-    direction = rule.get("direction", "").lower()
+    rule_id = str(rule.get("id", "")).strip()
+    instrument = str(rule.get("instrument", "")).strip()
+    direction = str(rule.get("direction", "")).strip().lower()
+
+    try:
+        short_w = int(rule.get("short", 0))
+        long_w = int(rule.get("long", 0))
+    except (ValueError, TypeError):
+        return alerts
 
     if short_w <= 0 or long_w <= 0 or short_w >= long_w:
         # Invalid window configuration
